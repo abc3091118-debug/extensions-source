@@ -44,6 +44,7 @@ abstract class NTKBase(
     protected val apiHeaders
         get() = headers.newBuilder()
             .set("Accept", "application/json")
+            .set("Referer", "$rootUrl/")
             .build()
 
     override val lang = "ko"
@@ -120,7 +121,7 @@ abstract class NTKBase(
                 window.fetch = async function() {
                     const response = await originalFetch.apply(this, arguments);
                     let reqUrl = arguments[0] && arguments[0].url ? arguments[0].url : arguments[0];
-                    if (reqUrl && reqUrl.toString().match(/\/api\/(manhwa|webtoon)-images/)) {
+                    if (reqUrl && reqUrl.toString().match(/\/api\//)) {
                         response.clone().text().then(text => {
                             window.TrojanTunnel.exfiltrate(text);
                         });
@@ -199,7 +200,7 @@ abstract class NTKBase(
 
     private val imageRefererInterceptor = Interceptor { chain ->
         val request = chain.request()
-        if (!request.url.host.matches(Regex("""sbxh\d+\.com"""))) {
+        if (request.header("Referer") == null) {
             chain.proceed(
                 request.newBuilder()
                     .header("Referer", "$rootUrl/")
@@ -261,6 +262,11 @@ abstract class NTKBase(
     }
 
     override fun popularMangaParse(response: Response): MangasPage {
+        val contentType = response.header("Content-Type") ?: ""
+        if (contentType.contains("text/html")) {
+            return scriptParse(response)
+        }
+
         val data = response.parseAs<WorksResponse>()
         val mangas = data.works.map { work ->
             SManga.create().apply {
@@ -273,13 +279,15 @@ abstract class NTKBase(
         return MangasPage(mangas, data.hasMore)
     }
 
-    override fun latestUpdatesParse(response: Response): MangasPage {
+    override fun latestUpdatesParse(response: Response): MangasPage = scriptParse(response)
+
+    private fun scriptParse(response: Response): MangasPage {
         val document = response.asJsoup()
 
         val rscData = document.select("script")
             .map { it.data() }
             .firstOrNull { "allCards" in it }
-            ?: return MangasPage(emptyList(), false)
+            ?: return htmlCardParse(response)
 
         val rawContent = rscData
             .substringAfter("[1,\"")
@@ -292,7 +300,7 @@ abstract class NTKBase(
 
         val marker = "\"allCards\":"
         val markerIdx = unescaped.indexOf(marker)
-        if (markerIdx < 0) return MangasPage(emptyList(), false)
+        if (markerIdx < 0) return htmlCardParse(response)
 
         val arrayStart = markerIdx + marker.length
         var depth = 0
@@ -328,7 +336,9 @@ abstract class NTKBase(
             }
         }
 
-        return MangasPage(mangas, hasNextPage = false)
+        val hasMore = unescaped.contains("\"hasNextPage\":true") || unescaped.contains("\"hasMore\":true")
+
+        return MangasPage(mangas, hasNextPage = hasMore)
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
@@ -336,7 +346,7 @@ abstract class NTKBase(
         return if (contentType.contains("application/json")) {
             popularMangaParse(response)
         } else {
-            htmlCardParse(response)
+            scriptParse(response)
         }
     }
 
